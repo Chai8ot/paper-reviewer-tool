@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Local analysis data and uploaded papers
+reviewer_tool/work/
+
+# Translation scratch/output files kept outside the app source
+a26_translate_work/
+*.docx
+*.pdf

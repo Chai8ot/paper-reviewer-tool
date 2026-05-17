@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>审稿小工具</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark">审</div>
+          <div>
+            <h1>审稿小工具</h1>
+            <p>论文图文快速核读</p>
+          </div>
+        </div>
+
+        <label class="upload">
+          <input id="fileInput" type="file" accept=".pdf,.doc,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+          <span>选择论文 PDF / Word</span>
+        </label>
+
+        <button id="analyzeBtn" class="primary" disabled>
+          <span class="icon">↗</span>
+          解析论文
+        </button>
+
+        <div id="status" class="status">等待上传文件</div>
+        <div id="meta" class="meta"></div>
+      </aside>
+
+      <main class="main">
+        <nav class="tabs">
+          <button class="tab active" data-tab="figures">附图</button>
+          <button class="tab" data-tab="summary">摘要</button>
+          <button class="tab" data-tab="innovations">创新点</button>
+          <button class="tab" data-tab="literature">文献核查</button>
+          <button class="tab" disabled>审稿意见</button>
+        </nav>
+
+        <section class="workspace" id="workspace">
+          <div class="figure-list" id="figureList">
+            <div class="empty">
+              <h2>上传论文后，这里会列出所有附图</h2>
+              <p>每张图会包含缩略图、英文图注、中文图注、相关正文段落和段落翻译。</p>
+            </div>
+          </div>
+
+          <article class="detail" id="detail">
+            <div class="empty detail-empty">
+              <h2>选择一张图查看详情</h2>
+              <p>点击左侧图片后，会在这里显示清晰大图和关联文本。</p>
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <div id="lightbox" class="lightbox" hidden>
+      <button id="closeLightbox" class="close" aria-label="关闭">×</button>
+      <img id="lightboxImg" alt="大图" />
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
