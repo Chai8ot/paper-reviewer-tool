@@ -106,6 +106,8 @@ function renderActiveTab() {
     renderInnovations();
   } else if (activeTab === "literature") {
     renderLiteratureChecks();
+  } else if (activeTab === "review") {
+    renderReviewComments();
   }
 }
 
@@ -222,6 +224,83 @@ function renderLiteratureChecks() {
       </div>
     </section>
   `;
+}
+
+function renderReviewComments() {
+  const review = result?.review_comments;
+  if (!review) {
+    detail.innerHTML = `<div class="empty"><h2>暂无审稿意见</h2><p>上传并解析论文后会生成符合国际期刊规范的英文审稿意见。</p></div>`;
+    return;
+  }
+  const text = review.review_text || composeReviewText(review);
+  detail.innerHTML = `
+    <section class="reading review-reading">
+      <div class="reading-head">
+        <div>
+          <h2>审稿意见</h2>
+          <p class="subtle">英文稿可直接粘贴到国际期刊审稿系统，提交前请结合你的专业判断复核。</p>
+        </div>
+        <span class="badge">${escapeHtml(review.recommendation || "Recommendation")}</span>
+      </div>
+      <div class="review-actions">
+        <button class="secondary" id="copyReviewBtn" type="button">复制全文</button>
+        <button class="secondary" id="downloadReviewBtn" type="button">下载 TXT</button>
+      </div>
+      ${review.overall_assessment ? block("总体评价", review.overall_assessment) : ""}
+      ${renderReviewList("主要问题", review.major_comments)}
+      ${renderReviewList("次要问题", review.minor_comments)}
+      ${renderReviewList("图表与表达", review.figure_comments)}
+      ${review.confidential_comments ? block("给编辑的保密意见", review.confidential_comments) : ""}
+      <div class="text-block">
+        <h3>可提交英文全文</h3>
+        <pre class="review-text">${escapeHtml(text)}</pre>
+      </div>
+    </section>
+  `;
+  document.querySelector("#copyReviewBtn").addEventListener("click", async () => {
+    await navigator.clipboard.writeText(text);
+    statusEl.textContent = "审稿意见已复制到剪贴板";
+  });
+  document.querySelector("#downloadReviewBtn").addEventListener("click", () => {
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const stem = (result?.file_name || "review").replace(/\.[^.]+$/, "");
+    link.href = url;
+    link.download = `${stem}_review_comments.txt`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  });
+}
+
+function renderReviewList(title, items) {
+  if (!Array.isArray(items) || !items.length) return "";
+  return `
+    <div class="text-block">
+      <h3>${escapeHtml(title)}</h3>
+      <ol class="point-list">
+        ${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+      </ol>
+    </div>
+  `;
+}
+
+function composeReviewText(review) {
+  const section = (title, body) => body ? `${title}\n${body}` : "";
+  const list = (title, items) => Array.isArray(items) && items.length
+    ? `${title}\n${items.map((item, index) => `${index + 1}. ${item}`).join("\n")}`
+    : "";
+  return [
+    section("Recommendation", review.recommendation),
+    section("Summary", review.manuscript_summary),
+    section("Overall assessment", review.overall_assessment),
+    list("Major comments", review.major_comments),
+    list("Minor comments", review.minor_comments),
+    list("Figures and presentation", review.figure_comments),
+    section("Confidential comments to the editor", review.confidential_comments),
+  ].filter(Boolean).join("\n\n");
 }
 
 function renderMatchedLiterature(items) {

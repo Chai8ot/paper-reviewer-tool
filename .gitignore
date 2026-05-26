@@ -9,3 +9,6 @@ reviewer_tool/work/
 a26_translate_work/
 *.docx
 *.pdf
+
+# Local packaged builds
+dist/

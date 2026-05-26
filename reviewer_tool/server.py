@@ -385,6 +385,106 @@ def assess_literature_overlap(innovations):
         return {"checks": checks, "index_count": len(index.get("items", {})), "source": f"fallback: {e}"}
 
 
+def build_review_comments(article_text, synthesis, literature, figures):
+    fallback = {
+        "recommendation": "Major revision",
+        "manuscript_summary": "",
+        "overall_assessment": "",
+        "major_comments": [],
+        "minor_comments": [],
+        "figure_comments": [],
+        "confidential_comments": "",
+        "review_text": "",
+        "source": "empty",
+    }
+    if not article_text.strip():
+        fallback["review_text"] = "The manuscript text could not be extracted reliably. Please inspect the PDF/Word file and rerun the analysis before preparing formal review comments."
+        return fallback
+
+    payload = {
+        "article_text": article_text[:36000],
+        "summary": synthesis.get("summary", {}),
+        "innovations": synthesis.get("innovations", []),
+        "literature_checks": literature.get("checks", []),
+        "figures": [
+            {
+                "figure_no": fig.get("figure_no", ""),
+                "caption": fig.get("caption", ""),
+                "related_paragraph": fig.get("paragraph", ""),
+            }
+            for fig in figures[:12]
+        ],
+    }
+    prompt = (
+        "You are an experienced reviewer for an international materials science journal. "
+        "Use stdin JSON to draft rigorous, fair, actionable peer-review comments in English. "
+        "Return JSON only with this schema: "
+        "{\"recommendation\":\"Accept/Minor revision/Major revision/Reject\","
+        "\"manuscript_summary\":\"\","
+        "\"overall_assessment\":\"\","
+        "\"major_comments\":[\"\"],"
+        "\"minor_comments\":[\"\"],"
+        "\"figure_comments\":[\"\"],"
+        "\"confidential_comments\":\"\","
+        "\"review_text\":\"\"}. "
+        "Standards: comments must match international journal review norms; be professional and evidence-based; "
+        "start with a concise manuscript summary; evaluate significance, novelty, methodological soundness, data support, "
+        "clarity, reproducibility, and literature positioning; identify whether novelty is weakened by the local literature-check results; "
+        "write major comments as numbered, actionable revision requests; write minor comments for clarity, terminology, references, figures, and formatting. "
+        "Do not invent details not present in the manuscript. If evidence is insufficient, say what must be provided. "
+        "Keep formulas, variables, phase names, chemical symbols, units, and references unchanged. "
+        "The review_text field must be a ready-to-submit review with sections: Recommendation, Summary, Overall assessment, Major comments, Minor comments, Figures and presentation, Confidential comments to the editor."
+    )
+    try:
+        data = parse_json_response(codex_text(prompt, json.dumps(payload, ensure_ascii=False), timeout=480))
+        if not isinstance(data, dict):
+            raise ValueError("模型输出不是 JSON object")
+        for key, value in fallback.items():
+            data.setdefault(key, value)
+        data["source"] = "codex"
+        return data
+    except Exception as e:
+        summary = synthesis.get("summary", {}) if isinstance(synthesis, dict) else {}
+        checks = literature.get("checks", []) if isinstance(literature, dict) else []
+        novelty_notes = [
+            c.get("suggested_review_note") or c.get("verdict", "")
+            for c in checks
+            if c.get("status") and not str(c.get("status")).startswith("未见")
+        ]
+        major = [
+            "The authors should clarify the precise novelty of the work against the most relevant prior literature and explicitly state what mechanistic or methodological advance is provided.",
+            "The manuscript should strengthen the evidence linking the reported observations to the central mechanistic interpretation, including clearer controls, quantitative comparisons, and uncertainty estimates where applicable.",
+            "The reproducibility of the experimental/computational procedure should be improved by providing sufficient details on sample preparation, analysis parameters, and data-processing criteria.",
+        ]
+        if novelty_notes:
+            major.insert(0, "The novelty claim requires careful revision because the local literature check identified potentially related prior work. The authors should compare directly with those studies and define the remaining advance.")
+        minor = [
+            "Please define all abbreviations at first use and keep terminology consistent throughout the manuscript.",
+            "Please check figure labels, units, scale bars, and caption completeness so that each figure can be understood independently.",
+            "The English expression should be polished for concision and journal style before resubmission.",
+        ]
+        review_text = "\n\n".join([
+            "Recommendation: Major revision",
+            f"Summary: {summary.get('one_sentence', 'The manuscript addresses a materials-science problem, but the extracted text was insufficient for a fully model-generated review.')}",
+            "Overall assessment: The topic appears potentially suitable for an international journal, but the manuscript requires clearer positioning, stronger evidence, and improved presentation before it can be judged conclusively.",
+            "Major comments:\n" + "\n".join(f"{i}. {x}" for i, x in enumerate(major, 1)),
+            "Minor comments:\n" + "\n".join(f"{i}. {x}" for i, x in enumerate(minor, 1)),
+            "Figures and presentation: The figures should be checked for readability, complete captions, scale bars, panel labels, and consistency with the claims in the text.",
+            f"Confidential comments to the editor: Automated drafting fell back to a conservative template because the model call failed: {e}",
+        ])
+        fallback.update({
+            "manuscript_summary": summary.get("one_sentence", ""),
+            "overall_assessment": "The manuscript requires clearer novelty positioning and stronger evidence before publication can be recommended.",
+            "major_comments": major,
+            "minor_comments": minor,
+            "figure_comments": ["Check figure readability, captions, scale bars, panel labels, and consistency with the claims in the text."],
+            "confidential_comments": f"Model drafting failed; fallback template used. Error: {e}",
+            "review_text": review_text,
+            "source": f"fallback: {e}",
+        })
+        return fallback
+
+
 def file_hash(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -718,6 +818,7 @@ def analyze(src):
     article_text = clean_article_text(page_texts)
     synthesis = build_summary_and_innovations(article_text)
     literature = assess_literature_overlap(synthesis.get("innovations", []))
+    review = build_review_comments(article_text, synthesis, literature, figures)
 
     result = {
         "job_id": job_id,
@@ -728,10 +829,12 @@ def analyze(src):
         "summary": synthesis.get("summary", {}),
         "innovations": synthesis.get("innovations", []),
         "literature_checks": literature.get("checks", []),
+        "review_comments": review,
         "zotero_index_count": literature.get("index_count", 0),
         "literature_source": literature.get("source", ""),
         "model": CODEX_MODEL if USE_MODEL else "offline",
         "synthesis_source": synthesis.get("source", ""),
+        "review_source": review.get("source", ""),
     }
     (job_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result

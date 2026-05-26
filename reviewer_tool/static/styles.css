@@ -108,6 +108,17 @@ p {
   font-weight: 700;
 }
 
+.secondary {
+  min-height: 36px;
+  border: 1px solid #b9d1cd;
+  border-radius: 8px;
+  color: var(--accent-dark);
+  background: #f6faf8;
+  cursor: pointer;
+  font-weight: 700;
+  padding: 0 14px;
+}
+
 .primary:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -310,6 +321,32 @@ p {
 
 .reading-head h2 {
   font-size: 24px;
+}
+
+.subtle {
+  color: var(--muted);
+  line-height: 1.55;
+  margin-top: 6px;
+}
+
+.review-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 12px 0 6px;
+}
+
+.review-text {
+  margin: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfaf6;
+  color: #24313a;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 14px;
 }
 
 .point-list {
