@@ -441,17 +441,26 @@ def assess_literature_overlap(innovations):
 def build_review_comments(article_text, synthesis, literature, figures):
     fallback = {
         "recommendation": "Major revision",
+        "recommendation_zh": "大修",
         "manuscript_summary": "",
+        "manuscript_summary_zh": "",
         "overall_assessment": "",
+        "overall_assessment_zh": "",
         "major_comments": [],
+        "major_comments_zh": [],
         "minor_comments": [],
+        "minor_comments_zh": [],
         "figure_comments": [],
+        "figure_comments_zh": [],
         "confidential_comments": "",
+        "confidential_comments_zh": "",
         "review_text": "",
+        "review_text_zh": "",
         "source": "empty",
     }
     if not article_text.strip():
         fallback["review_text"] = "The manuscript text could not be extracted reliably. Please inspect the PDF/Word file and rerun the analysis before preparing formal review comments."
+        fallback["review_text_zh"] = "无法可靠抽取论文正文。请检查 PDF/Word 文件后重新解析，再准备正式审稿意见。"
         return fallback
 
     payload = {
@@ -473,20 +482,29 @@ def build_review_comments(article_text, synthesis, literature, figures):
         "Use stdin JSON to draft rigorous, fair, actionable peer-review comments in English. "
         "Return JSON only with this schema: "
         "{\"recommendation\":\"Accept/Minor revision/Major revision/Reject\","
+        "\"recommendation_zh\":\"接受/小修/大修/拒稿\","
         "\"manuscript_summary\":\"\","
+        "\"manuscript_summary_zh\":\"\","
         "\"overall_assessment\":\"\","
+        "\"overall_assessment_zh\":\"\","
         "\"major_comments\":[\"\"],"
+        "\"major_comments_zh\":[\"\"],"
         "\"minor_comments\":[\"\"],"
+        "\"minor_comments_zh\":[\"\"],"
         "\"figure_comments\":[\"\"],"
+        "\"figure_comments_zh\":[\"\"],"
         "\"confidential_comments\":\"\","
-        "\"review_text\":\"\"}. "
+        "\"confidential_comments_zh\":\"\","
+        "\"review_text\":\"\","
+        "\"review_text_zh\":\"\"}. "
         "Standards: comments must match international journal review norms; be professional and evidence-based; "
         "start with a concise manuscript summary; evaluate significance, novelty, methodological soundness, data support, "
         "clarity, reproducibility, and literature positioning; identify whether novelty is weakened by the local literature-check results; "
         "write major comments as numbered, actionable revision requests; write minor comments for clarity, terminology, references, figures, and formatting. "
         "Do not invent details not present in the manuscript. If evidence is insufficient, say what must be provided. "
         "Keep formulas, variables, phase names, chemical symbols, units, and references unchanged. "
-        "The review_text field must be a ready-to-submit review with sections: Recommendation, Summary, Overall assessment, Major comments, Minor comments, Figures and presentation, Confidential comments to the editor."
+        "The review_text field must be a ready-to-submit English review with sections: Recommendation, Summary, Overall assessment, Major comments, Minor comments, Figures and presentation, Confidential comments to the editor. "
+        "All *_zh fields must be faithful Simplified Chinese counterparts for side-by-side comparison, preserving formulas, variables, symbols, units, and references."
     )
     try:
         data = parse_json_response(codex_text(prompt, json.dumps(payload, ensure_ascii=False), timeout=480))
@@ -526,16 +544,69 @@ def build_review_comments(article_text, synthesis, literature, figures):
             f"Confidential comments to the editor: Automated drafting fell back to a conservative template because the model call failed: {e}",
         ])
         fallback.update({
+            "recommendation_zh": "大修",
             "manuscript_summary": summary.get("one_sentence", ""),
+            "manuscript_summary_zh": translate_zh(summary.get("one_sentence", "")),
             "overall_assessment": "The manuscript requires clearer novelty positioning and stronger evidence before publication can be recommended.",
+            "overall_assessment_zh": "在建议发表之前，稿件需要更清晰地界定创新性，并提供更有力的证据支持。",
             "major_comments": major,
+            "major_comments_zh": [translate_zh(x) for x in major],
             "minor_comments": minor,
+            "minor_comments_zh": [translate_zh(x) for x in minor],
             "figure_comments": ["Check figure readability, captions, scale bars, panel labels, and consistency with the claims in the text."],
+            "figure_comments_zh": ["请检查图件可读性、图注、比例尺、分图标签，以及其与正文论断的一致性。"],
             "confidential_comments": f"Model drafting failed; fallback template used. Error: {e}",
+            "confidential_comments_zh": f"模型生成失败，已使用保守模板。错误：{e}",
             "review_text": review_text,
+            "review_text_zh": translate_zh(review_text),
             "source": f"fallback: {e}",
         })
         return fallback
+
+
+def ensure_review_bilingual(result):
+    review = result.get("review_comments")
+    if not isinstance(review, dict) or not review.get("review_text") or review.get("review_text_zh"):
+        return False
+    payload = {
+        "recommendation": review.get("recommendation", ""),
+        "manuscript_summary": review.get("manuscript_summary", ""),
+        "overall_assessment": review.get("overall_assessment", ""),
+        "major_comments": review.get("major_comments", []),
+        "minor_comments": review.get("minor_comments", []),
+        "figure_comments": review.get("figure_comments", []),
+        "confidential_comments": review.get("confidential_comments", ""),
+        "review_text": review.get("review_text", ""),
+    }
+    prompt = (
+        "你是国际期刊审稿意见翻译助手。请把 stdin 中 JSON 的英文审稿意见翻译为忠实、专业的简体中文。"
+        "只输出 JSON object，字段为：recommendation_zh、manuscript_summary_zh、overall_assessment_zh、"
+        "major_comments_zh、minor_comments_zh、figure_comments_zh、confidential_comments_zh、review_text_zh。"
+        "要求：保留公式、变量、材料相名、化学式、单位、引用和编号；不要增删审稿意见含义。"
+    )
+    try:
+        data = parse_json_response(codex_text(prompt, json.dumps(payload, ensure_ascii=False), timeout=360))
+        if not isinstance(data, dict):
+            raise ValueError("模型输出不是 JSON object")
+        for key, value in data.items():
+            if key.endswith("_zh"):
+                review[key] = normalize_model_translation(value) if isinstance(value, str) else value
+    except Exception:
+        review["recommendation_zh"] = {
+            "Accept": "接受",
+            "Minor revision": "小修",
+            "Major revision": "大修",
+            "Reject": "拒稿",
+        }.get(review.get("recommendation", ""), "")
+        review["manuscript_summary_zh"] = translate_zh(review.get("manuscript_summary", ""))
+        review["overall_assessment_zh"] = translate_zh(review.get("overall_assessment", ""))
+        review["major_comments_zh"] = [translate_zh(x) for x in review.get("major_comments", [])]
+        review["minor_comments_zh"] = [translate_zh(x) for x in review.get("minor_comments", [])]
+        review["figure_comments_zh"] = [translate_zh(x) for x in review.get("figure_comments", [])]
+        review["confidential_comments_zh"] = translate_zh(review.get("confidential_comments", ""))
+        review["review_text_zh"] = translate_zh(review.get("review_text", ""))
+    result["review_comments"] = review
+    return True
 
 
 def file_hash(path):
@@ -859,7 +930,10 @@ def load_result(job_id):
     result_path = JOBS / job_id / "result.json"
     if not result_path.exists():
         raise RuntimeError("没有找到该历史解析结果。")
-    return json.loads(result_path.read_text(encoding="utf-8"))
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    if ensure_review_bilingual(result):
+        result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
 
 
 def analyze(src):
@@ -974,7 +1048,10 @@ class Handler(SimpleHTTPRequestHandler):
                 if not results:
                     self.send_json({"error": "还没有解析结果。"}, 404)
                     return
-                self.send_json(json.loads(results[0].read_text(encoding="utf-8")))
+                result = json.loads(results[0].read_text(encoding="utf-8"))
+                if ensure_review_bilingual(result):
+                    results[0].write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                self.send_json(result)
             except Exception as e:
                 self.send_json({"error": str(e)}, 500)
             return

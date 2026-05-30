@@ -400,6 +400,41 @@ p {
   font-size: 14px;
 }
 
+.review-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.review-pair p {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fffdf8;
+}
+
+.zh-review {
+  background: #f6faf8 !important;
+  border-left: 4px solid var(--accent) !important;
+}
+
+.bilingual-list {
+  display: grid;
+  gap: 12px;
+}
+
+.bilingual-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fffdf8;
+  line-height: 1.72;
+}
+
 .fulltext-reading {
   max-width: 1320px;
 }
@@ -657,6 +692,11 @@ p {
   }
 
   .translation-row {
+    grid-template-columns: 1fr;
+  }
+
+  .review-pair,
+  .bilingual-item {
     grid-template-columns: 1fr;
   }
 }

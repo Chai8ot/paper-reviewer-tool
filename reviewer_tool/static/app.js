@@ -288,46 +288,86 @@ function renderReviewComments() {
     return;
   }
   const text = review.review_text || composeReviewText(review);
+  const textZh = review.review_text_zh || composeReviewTextZh(review);
   detail.innerHTML = `
     <section class="reading review-reading">
       <div class="reading-head">
         <div>
-          <h2>审稿意见</h2>
-          <p class="subtle">英文稿可直接粘贴到国际期刊审稿系统，提交前请结合你的专业判断复核。</p>
+          <h2>审稿意见对照</h2>
+          <p class="subtle">左侧为可提交英文稿，右侧为中文对照；提交前请结合你的专业判断复核。</p>
         </div>
-        <span class="badge">${escapeHtml(review.recommendation || "Recommendation")}</span>
+        <span class="badge">${escapeHtml(review.recommendation || "Recommendation")} / ${escapeHtml(review.recommendation_zh || "中文")}</span>
       </div>
       <div class="review-actions">
-        <button class="secondary" id="copyReviewBtn" type="button">复制全文</button>
-        <button class="secondary" id="downloadReviewBtn" type="button">下载 TXT</button>
+        <button class="secondary" id="copyReviewBtn" type="button">复制英文全文</button>
+        <button class="secondary" id="copyReviewZhBtn" type="button">复制中文全文</button>
+        <button class="secondary" id="downloadReviewBtn" type="button">下载英文 TXT</button>
+        <button class="secondary" id="downloadReviewZhBtn" type="button">下载中文 TXT</button>
       </div>
-      ${review.overall_assessment ? block("总体评价", review.overall_assessment) : ""}
-      ${renderReviewList("主要问题", review.major_comments)}
-      ${renderReviewList("次要问题", review.minor_comments)}
-      ${renderReviewList("图表与表达", review.figure_comments)}
-      ${review.confidential_comments ? block("给编辑的保密意见", review.confidential_comments) : ""}
+      ${renderBilingualBlock("Summary / 稿件概述", review.manuscript_summary, review.manuscript_summary_zh)}
+      ${renderBilingualBlock("Overall assessment / 总体评价", review.overall_assessment, review.overall_assessment_zh)}
+      ${renderBilingualList("Major comments / 主要问题", review.major_comments, review.major_comments_zh)}
+      ${renderBilingualList("Minor comments / 次要问题", review.minor_comments, review.minor_comments_zh)}
+      ${renderBilingualList("Figures and presentation / 图表与表达", review.figure_comments, review.figure_comments_zh)}
+      ${renderBilingualBlock("Confidential comments to the editor / 给编辑的保密意见", review.confidential_comments, review.confidential_comments_zh)}
       <div class="text-block">
-        <h3>可提交英文全文</h3>
-        <pre class="review-text">${escapeHtml(text)}</pre>
+        <h3>可提交全文对照</h3>
+        <div class="review-pair">
+          <pre class="review-text">${escapeHtml(text)}</pre>
+          <pre class="review-text zh-review">${escapeHtml(textZh || "旧解析结果没有中文审稿意见，请重新解析该稿件以生成中英文对照。")}</pre>
+        </div>
       </div>
     </section>
   `;
   document.querySelector("#copyReviewBtn").addEventListener("click", async () => {
     await navigator.clipboard.writeText(text);
-    statusEl.textContent = "审稿意见已复制到剪贴板";
+    statusEl.textContent = "英文审稿意见已复制到剪贴板";
+  });
+  document.querySelector("#copyReviewZhBtn").addEventListener("click", async () => {
+    await navigator.clipboard.writeText(textZh);
+    statusEl.textContent = "中文审稿意见已复制到剪贴板";
   });
   document.querySelector("#downloadReviewBtn").addEventListener("click", () => {
-    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
     const stem = (result?.file_name || "review").replace(/\.[^.]+$/, "");
-    link.href = url;
-    link.download = `${stem}_review_comments.txt`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
+    downloadText(`${stem}_review_comments_en.txt`, text);
   });
+  document.querySelector("#downloadReviewZhBtn").addEventListener("click", () => {
+    const stem = (result?.file_name || "review").replace(/\.[^.]+$/, "");
+    downloadText(`${stem}_review_comments_zh.txt`, textZh);
+  });
+}
+
+function renderBilingualBlock(title, en, zh) {
+  if (!en && !zh) return "";
+  return `
+    <div class="text-block">
+      <h3>${escapeHtml(title)}</h3>
+      <div class="review-pair">
+        <p>${escapeHtml(en || "Not available.")}</p>
+        <p class="zh-review">${escapeHtml(zh || "暂无中文对照，请重新解析该稿件。")}</p>
+      </div>
+    </div>
+  `;
+}
+
+function renderBilingualList(title, enItems, zhItems) {
+  const en = Array.isArray(enItems) ? enItems : [];
+  const zh = Array.isArray(zhItems) ? zhItems : [];
+  if (!en.length && !zh.length) return "";
+  const length = Math.max(en.length, zh.length);
+  return `
+    <div class="text-block">
+      <h3>${escapeHtml(title)}</h3>
+      <div class="bilingual-list">
+        ${Array.from({ length }, (_, index) => `
+          <div class="bilingual-item">
+            <div><strong>${index + 1}.</strong> ${escapeHtml(en[index] || "Not available.")}</div>
+            <div class="zh-review"><strong>${index + 1}.</strong> ${escapeHtml(zh[index] || "暂无中文对照，请重新解析该稿件。")}</div>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
 }
 
 function renderReviewList(title, items) {
@@ -356,6 +396,34 @@ function composeReviewText(review) {
     list("Figures and presentation", review.figure_comments),
     section("Confidential comments to the editor", review.confidential_comments),
   ].filter(Boolean).join("\n\n");
+}
+
+function composeReviewTextZh(review) {
+  const section = (title, body) => body ? `${title}\n${body}` : "";
+  const list = (title, items) => Array.isArray(items) && items.length
+    ? `${title}\n${items.map((item, index) => `${index + 1}. ${item}`).join("\n")}`
+    : "";
+  return [
+    section("推荐结论", review.recommendation_zh),
+    section("稿件概述", review.manuscript_summary_zh),
+    section("总体评价", review.overall_assessment_zh),
+    list("主要问题", review.major_comments_zh),
+    list("次要问题", review.minor_comments_zh),
+    list("图表与表达", review.figure_comments_zh),
+    section("给编辑的保密意见", review.confidential_comments_zh),
+  ].filter(Boolean).join("\n\n");
+}
+
+function downloadText(filename, text) {
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function renderMatchedLiterature(items) {
