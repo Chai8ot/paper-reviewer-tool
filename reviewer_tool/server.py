@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import tempfile
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -34,6 +35,7 @@ PYTHON = sys.executable
 CODEX_BIN = shutil.which("codex") or "/Applications/Codex.app/Contents/Resources/codex"
 CODEX_MODEL = os.environ.get("REVIEWER_TOOL_MODEL", "gpt-5.4")
 USE_MODEL = os.environ.get("REVIEWER_TOOL_USE_MODEL", "1") != "0"
+ANALYSIS_LOCK = threading.Lock()
 
 
 def run(cmd, cwd=None, timeout=120):
@@ -109,6 +111,13 @@ def update_progress(progress_id, percent, stage, message="", status="running"):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def heartbeat_progress(progress_id, stage, message):
+    if not progress_id:
+        return
+    data = read_progress(progress_id)
+    update_progress(progress_id, data.get("percent", 0), stage, message, data.get("status", "running"))
+
+
 def translate_zh(text):
     text = text.strip()
     if not text:
@@ -122,13 +131,14 @@ def translate_zh(text):
     return text
 
 
-def codex_text(prompt, source_text, timeout=300):
+def codex_text(prompt, source_text, timeout=300, progress_id=None, stage="模型调用"):
     if not USE_MODEL or not CODEX_BIN or not Path(CODEX_BIN).exists():
         raise RuntimeError("Codex 模型翻译未启用或不可用。")
     with tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".txt", delete=False) as out:
         out_path = out.name
     try:
-        proc = subprocess.run(
+        started = time.time()
+        proc = subprocess.Popen(
             [
                 CODEX_BIN,
                 "exec",
@@ -141,14 +151,28 @@ def codex_text(prompt, source_text, timeout=300):
                 out_path,
                 prompt,
             ],
-            input=source_text,
-            text=True,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=timeout,
+            text=True,
         )
+        assert proc.stdin is not None
+        proc.stdin.write(source_text)
+        proc.stdin.close()
+        last_heartbeat = 0
+        while proc.poll() is None:
+            elapsed = int(time.time() - started)
+            if elapsed > timeout:
+                proc.kill()
+                raise RuntimeError(f"{stage} 超时：超过 {timeout} 秒。")
+            if progress_id and elapsed - last_heartbeat >= 10:
+                last_heartbeat = elapsed
+                heartbeat_progress(progress_id, stage, f"模型仍在生成，已等待 {elapsed} 秒")
+            time.sleep(1)
+        stdout = proc.stdout.read() if proc.stdout else ""
+        stderr = proc.stderr.read() if proc.stderr else ""
         if proc.returncode != 0:
-            raise RuntimeError(proc.stderr or proc.stdout)
+            raise RuntimeError(stderr or stdout)
         return Path(out_path).read_text(encoding="utf-8").strip()
     finally:
         try:
@@ -174,7 +198,7 @@ def normalize_model_translation(text):
     return text.translate(str.maketrans({"\uf061": "α", "\uf067": "γ", "\uf06d": "μ", "\uf02d": "−"})).strip()
 
 
-def translate_figure_texts(figures):
+def translate_figure_texts(figures, progress_id=None):
     items = []
     for fig in figures:
         items.append({
@@ -193,7 +217,13 @@ def translate_figure_texts(figures):
         "transformation induced plasticity=相变诱导塑性；deformation-induced=变形诱导。"
     )
     try:
-        translated = parse_json_response(codex_text(prompt, json.dumps(items, ensure_ascii=False), timeout=420))
+        translated = parse_json_response(codex_text(
+            prompt,
+            json.dumps(items, ensure_ascii=False),
+            timeout=420,
+            progress_id=progress_id,
+            stage="附图翻译",
+        ))
         by_id = {item.get("id"): item for item in translated if isinstance(item, dict)}
         for fig in figures:
             item = by_id.get(fig["id"], {})
@@ -266,7 +296,13 @@ def translate_article_paragraphs(page_texts, progress_id=None):
                 "全文翻译",
                 f"正在翻译第 {start + 1}-{min(start + len(chunk), len(paragraphs))} 段，共 {len(paragraphs)} 段",
             )
-            data = parse_json_response(codex_text(prompt, json.dumps(chunk, ensure_ascii=False), timeout=480))
+            data = parse_json_response(codex_text(
+                prompt,
+                json.dumps(chunk, ensure_ascii=False),
+                timeout=480,
+                progress_id=progress_id,
+                stage="全文翻译",
+            ))
             if not isinstance(data, list):
                 raise ValueError("模型输出不是 JSON array")
             by_id = {item.get("id"): item for item in data if isinstance(item, dict)}
@@ -282,7 +318,7 @@ def translate_article_paragraphs(page_texts, progress_id=None):
     return {"paragraphs": translated, "source": source}
 
 
-def build_summary_and_innovations(article_text):
+def build_summary_and_innovations(article_text, progress_id=None):
     fallback = {
         "summary": {
             "title": "摘要",
@@ -308,7 +344,13 @@ def build_summary_and_innovations(article_text):
         "创新点列 3-6 条，重点写相对于已有认识的新增贡献。search_terms 用英文，适合检索已有英文文献。"
     )
     try:
-        data = parse_json_response(codex_text(prompt, article_text, timeout=420))
+        data = parse_json_response(codex_text(
+            prompt,
+            article_text,
+            timeout=420,
+            progress_id=progress_id,
+            stage="摘要与创新点",
+        ))
         if not isinstance(data, dict):
             raise ValueError("模型输出不是 JSON object")
         data["source"] = "codex"
@@ -446,7 +488,7 @@ def search_zotero_candidates(index, innovation, limit=6):
     return candidates[:limit]
 
 
-def assess_literature_overlap(innovations):
+def assess_literature_overlap(innovations, progress_id=None):
     if not innovations:
         return {"checks": [], "index_count": 0, "source": "empty"}
     index = build_zotero_index()
@@ -469,7 +511,13 @@ def assess_literature_overlap(innovations):
         "如果候选片段只是主题相近但没有同一机制/结论，标为部分相关或证据不足。"
     )
     try:
-        checks = parse_json_response(codex_text(prompt, json.dumps(payload, ensure_ascii=False), timeout=420))
+        checks = parse_json_response(codex_text(
+            prompt,
+            json.dumps(payload, ensure_ascii=False),
+            timeout=420,
+            progress_id=progress_id,
+            stage="文献核查",
+        ))
         if not isinstance(checks, list):
             raise ValueError("模型输出不是 JSON array")
         by_id = {item.get("innovation_id"): item for item in checks if isinstance(item, dict)}
@@ -499,7 +547,7 @@ def assess_literature_overlap(innovations):
         return {"checks": checks, "index_count": len(index.get("items", {})), "source": f"fallback: {e}"}
 
 
-def build_review_comments(article_text, synthesis, literature, figures):
+def build_review_comments(article_text, synthesis, literature, figures, progress_id=None):
     fallback = {
         "recommendation": "Major revision",
         "recommendation_zh": "大修",
@@ -568,7 +616,13 @@ def build_review_comments(article_text, synthesis, literature, figures):
         "All *_zh fields must be faithful Simplified Chinese counterparts for side-by-side comparison, preserving formulas, variables, symbols, units, and references."
     )
     try:
-        data = parse_json_response(codex_text(prompt, json.dumps(payload, ensure_ascii=False), timeout=480))
+        data = parse_json_response(codex_text(
+            prompt,
+            json.dumps(payload, ensure_ascii=False),
+            timeout=480,
+            progress_id=progress_id,
+            stage="审稿意见",
+        ))
         if not isinstance(data, dict):
             raise ValueError("模型输出不是 JSON object")
         for key, value in fallback.items():
@@ -1043,16 +1097,16 @@ def analyze(src, progress_id=None):
                 "paragraph": para,
             })
     update_progress(progress_id, 46, "附图翻译", f"识别到 {len(figures)} 张附图，正在翻译图注和相关段落")
-    figures = translate_figure_texts(figures)
+    figures = translate_figure_texts(figures, progress_id=progress_id)
     update_progress(progress_id, 56, "全文翻译", "正在生成全文原文-中文对照")
     full_translation = translate_article_paragraphs(page_texts, progress_id)
     update_progress(progress_id, 72, "摘要与创新点", "正在生成论文摘要和创新点")
     article_text = clean_article_text(page_texts)
-    synthesis = build_summary_and_innovations(article_text)
+    synthesis = build_summary_and_innovations(article_text, progress_id=progress_id)
     update_progress(progress_id, 82, "文献核查", "正在检索 Zotero 本地库并判断创新性")
-    literature = assess_literature_overlap(synthesis.get("innovations", []))
+    literature = assess_literature_overlap(synthesis.get("innovations", []), progress_id=progress_id)
     update_progress(progress_id, 92, "审稿意见", "正在生成中英文审稿意见")
-    review = build_review_comments(article_text, synthesis, literature, figures)
+    review = build_review_comments(article_text, synthesis, literature, figures, progress_id=progress_id)
 
     result = {
         "job_id": job_id,
@@ -1079,6 +1133,10 @@ def analyze(src, progress_id=None):
 
 
 class Handler(SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def translate_path(self, path):
         parsed = urlparse(path).path
         if parsed.startswith("/work/"):
@@ -1113,8 +1171,16 @@ class Handler(SimpleHTTPRequestHandler):
             dest = UPLOADS / filename
             with open(dest, "wb") as f:
                 shutil.copyfileobj(item.file, f)
-            result = analyze(dest, progress_id=progress_id)
-            self.send_json(result)
+            acquired = ANALYSIS_LOCK.acquire(blocking=False)
+            if not acquired:
+                update_progress(progress_id, 2, "等待中", "已有解析任务正在运行，正在排队等待")
+                ANALYSIS_LOCK.acquire()
+                update_progress(progress_id, 2, "等待结束", "已获得解析执行权")
+            try:
+                result = analyze(dest, progress_id=progress_id)
+                self.send_json(result)
+            finally:
+                ANALYSIS_LOCK.release()
         except Exception as e:
             update_progress(progress_id, 100, "解析失败", str(e), status="error")
             self.send_json({"error": str(e)}, 500)
