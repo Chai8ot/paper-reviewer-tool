@@ -12,7 +12,7 @@ import time
 import tempfile
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from PIL import Image
 
@@ -166,6 +166,59 @@ def clean_article_text(page_texts, max_chars=42000):
     text = "\n\n".join(paras)
     text = text.translate(str.maketrans({"\uf061": "α", "\uf067": "γ", "\uf06d": "μ", "\uf02d": "−"}))
     return text[:max_chars]
+
+
+def article_paragraphs(page_texts):
+    paragraphs = []
+    seen = set()
+    for page_no, page in enumerate(page_texts, 1):
+        for para in paragraph_candidates(page):
+            if re.match(r"^(Figure|Fig\.?|Table)\s+", para, re.I):
+                continue
+            if "Powered by Editorial Manager" in para:
+                continue
+            normalized = para.translate(str.maketrans({"\uf061": "α", "\uf067": "γ", "\uf06d": "μ", "\uf02d": "−"})).strip()
+            key = re.sub(r"\W+", "", normalized.lower())[:220]
+            if not normalized or key in seen:
+                continue
+            seen.add(key)
+            paragraphs.append({
+                "id": f"p-{len(paragraphs)+1}",
+                "page": page_no,
+                "text": normalized,
+            })
+    return paragraphs
+
+
+def translate_article_paragraphs(page_texts):
+    paragraphs = article_paragraphs(page_texts)
+    if not paragraphs:
+        return {"paragraphs": [], "source": "empty"}
+    translated = []
+    source = "codex"
+    prompt = (
+        "你是材料科学论文全文翻译助手。请将 stdin JSON 数组中每个段落的 text 翻译为高质量简体中文。"
+        "只输出 JSON 数组；每项保留 id，并给出 text_zh。"
+        "要求：忠实原文，不增删科学结论；保留公式、变量、相名、化学式、单位、晶体学符号、图表编号和文献引用格式；"
+        "若遇到疑似公式或残缺段落，尽量保持原有格式并翻译周围自然语言。"
+    )
+    try:
+        for start in range(0, len(paragraphs), 18):
+            chunk = paragraphs[start:start + 18]
+            data = parse_json_response(codex_text(prompt, json.dumps(chunk, ensure_ascii=False), timeout=480))
+            if not isinstance(data, list):
+                raise ValueError("模型输出不是 JSON array")
+            by_id = {item.get("id"): item for item in data if isinstance(item, dict)}
+            for para in chunk:
+                item = by_id.get(para["id"], {})
+                translated.append({
+                    **para,
+                    "text_zh": normalize_model_translation(item.get("text_zh", "")) or translate_zh(para["text"]),
+                })
+    except Exception as e:
+        source = f"offline_fallback: {e}"
+        translated = [{**para, "text_zh": translate_zh(para["text"])} for para in paragraphs]
+    return {"paragraphs": translated, "source": source}
 
 
 def build_summary_and_innovations(article_text):
@@ -775,6 +828,40 @@ def make_thumbnail(image_path, job_dir, figure_no):
     return out
 
 
+def result_summary(result_path):
+    data = json.loads(result_path.read_text(encoding="utf-8"))
+    stat = result_path.stat()
+    return {
+        "job_id": data.get("job_id", result_path.parent.name),
+        "file_name": data.get("file_name", "未命名稿件"),
+        "page_count": data.get("page_count", 0),
+        "figure_count": data.get("figure_count", 0),
+        "paragraph_count": len(data.get("full_translation", []) or []),
+        "recommendation": (data.get("review_comments") or {}).get("recommendation", ""),
+        "updated_at": stat.st_mtime,
+    }
+
+
+def history_results():
+    results = sorted(JOBS.glob("*/result.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    out = []
+    for result_path in results:
+        try:
+            out.append(result_summary(result_path))
+        except Exception:
+            continue
+    return out
+
+
+def load_result(job_id):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", job_id or ""):
+        raise RuntimeError("无效的历史结果 ID。")
+    result_path = JOBS / job_id / "result.json"
+    if not result_path.exists():
+        raise RuntimeError("没有找到该历史解析结果。")
+    return json.loads(result_path.read_text(encoding="utf-8"))
+
+
 def analyze(src):
     ensure_dirs()
     job_id = f"{int(time.time())}-{file_hash(src)}"
@@ -815,6 +902,7 @@ def analyze(src):
                 "paragraph": para,
             })
     figures = translate_figure_texts(figures)
+    full_translation = translate_article_paragraphs(page_texts)
     article_text = clean_article_text(page_texts)
     synthesis = build_summary_and_innovations(article_text)
     literature = assess_literature_overlap(synthesis.get("innovations", []))
@@ -826,6 +914,8 @@ def analyze(src):
         "page_count": pages,
         "figure_count": len(figures),
         "figures": figures,
+        "full_translation": full_translation.get("paragraphs", []),
+        "full_translation_source": full_translation.get("source", ""),
         "summary": synthesis.get("summary", {}),
         "innovations": synthesis.get("innovations", []),
         "literature_checks": literature.get("checks", []),
@@ -877,7 +967,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"error": str(e)}, 500)
 
     def do_GET(self):
-        if self.path == "/api/latest":
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/latest":
             try:
                 results = sorted(JOBS.glob("*/result.json"), key=lambda p: p.stat().st_mtime, reverse=True)
                 if not results:
@@ -886,6 +977,19 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json(json.loads(results[0].read_text(encoding="utf-8")))
             except Exception as e:
                 self.send_json({"error": str(e)}, 500)
+            return
+        if parsed.path == "/api/history":
+            try:
+                self.send_json({"items": history_results()})
+            except Exception as e:
+                self.send_json({"error": str(e)}, 500)
+            return
+        if parsed.path == "/api/result":
+            try:
+                job_id = parse_qs(parsed.query).get("job_id", [""])[0]
+                self.send_json(load_result(job_id))
+            except Exception as e:
+                self.send_json({"error": str(e)}, 404)
             return
         return super().do_GET()
 

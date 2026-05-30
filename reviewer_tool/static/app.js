@@ -6,6 +6,7 @@ const figureList = document.querySelector("#figureList");
 const detail = document.querySelector("#detail");
 const workspace = document.querySelector("#workspace");
 const tabs = Array.from(document.querySelectorAll(".tab[data-tab]"));
+const historyList = document.querySelector("#historyList");
 const lightbox = document.querySelector("#lightbox");
 const lightboxImg = document.querySelector("#lightboxImg");
 const closeLightbox = document.querySelector("#closeLightbox");
@@ -13,6 +14,7 @@ const closeLightbox = document.querySelector("#closeLightbox");
 let result = null;
 let selectedId = null;
 let activeTab = "figures";
+let historyItems = [];
 
 tabs.forEach((tab) => {
   tab.addEventListener("click", () => {
@@ -33,7 +35,7 @@ analyzeBtn.addEventListener("click", async () => {
   const data = new FormData();
   data.append("file", file);
   analyzeBtn.disabled = true;
-  statusEl.textContent = "正在解析论文、抽取附图和翻译文本。这一步可能需要几十秒。";
+  statusEl.textContent = "正在解析论文、抽取附图、生成全文对照和审稿意见。这一步可能需要几分钟。";
   metaEl.textContent = "";
   figureList.innerHTML = `<div class="empty"><h2>解析中</h2><p>正在渲染页面并定位图注。</p></div>`;
   detail.innerHTML = `<div class="empty detail-empty"><h2>请稍候</h2><p>结果生成后会自动显示第一张图。</p></div>`;
@@ -42,11 +44,9 @@ analyzeBtn.addEventListener("click", async () => {
     const response = await fetch("/api/analyze", { method: "POST", body: data });
     const payload = await response.json();
     if (!response.ok || payload.error) throw new Error(payload.error || "解析失败");
-    result = payload;
-    selectedId = result.figures[0]?.id || null;
+    setResult(payload);
     statusEl.textContent = result.figure_count ? "解析完成" : "没有识别到 Figure/Fig. 图注";
-    renderMeta();
-    renderActiveTab();
+    loadHistory();
   } catch (error) {
     statusEl.textContent = `解析失败：${error.message}`;
     figureList.innerHTML = `<div class="empty"><h2>解析失败</h2><p>${escapeHtml(error.message)}</p></div>`;
@@ -54,6 +54,14 @@ analyzeBtn.addEventListener("click", async () => {
     analyzeBtn.disabled = false;
   }
 });
+
+function setResult(payload) {
+  result = payload;
+  selectedId = result.figures?.[0]?.id || null;
+  renderMeta();
+  renderActiveTab();
+  renderHistory();
+}
 
 function renderList() {
   if (!result?.figures?.length) {
@@ -87,7 +95,8 @@ function renderMeta() {
     return;
   }
   const zotero = result.zotero_index_count ? `<br>Zotero：${result.zotero_index_count} 篇` : "";
-  metaEl.innerHTML = `文件：${escapeHtml(result.file_name)}<br>页数：${result.page_count}<br>附图：${result.figure_count}<br>模型：${escapeHtml(result.model || "offline")}${zotero}`;
+  const paragraphs = Array.isArray(result.full_translation) ? `<br>全文段落：${result.full_translation.length}` : "";
+  metaEl.innerHTML = `文件：${escapeHtml(result.file_name)}<br>页数：${result.page_count}<br>附图：${result.figure_count}${paragraphs}<br>模型：${escapeHtml(result.model || "offline")}${zotero}`;
 }
 
 function renderActiveTab() {
@@ -102,6 +111,8 @@ function renderActiveTab() {
   figureList.innerHTML = "";
   if (activeTab === "summary") {
     renderSummary();
+  } else if (activeTab === "fulltext") {
+    renderFullText();
   } else if (activeTab === "innovations") {
     renderInnovations();
   } else if (activeTab === "literature") {
@@ -143,6 +154,50 @@ function renderDetail() {
   detail.querySelector(".hero-image").addEventListener("click", () => {
     lightboxImg.src = fig.image_url;
     lightbox.hidden = false;
+  });
+}
+
+function renderFullText() {
+  const paragraphs = Array.isArray(result?.full_translation) ? result.full_translation : [];
+  if (!paragraphs.length) {
+    detail.innerHTML = `<div class="empty"><h2>暂无全文对照</h2><p>新解析的稿件会生成全文原文和中文译文对照；旧历史结果可重新解析以补齐此功能。</p></div>`;
+    return;
+  }
+  const text = paragraphs.map((item) => `[Page ${item.page}] ${item.text}\n${item.text_zh || ""}`).join("\n\n");
+  detail.innerHTML = `
+    <section class="reading fulltext-reading">
+      <div class="reading-head">
+        <div>
+          <h2>全文翻译对照</h2>
+          <p class="subtle">左侧为原文，右侧为中文译文；译文始终显示，方便逐段核对。</p>
+        </div>
+        <span class="badge">${paragraphs.length} 段 · ${escapeHtml(result?.full_translation_source || "")}</span>
+      </div>
+      <div class="review-actions">
+        <button class="secondary" id="downloadFullTextBtn" type="button">下载对照 TXT</button>
+      </div>
+      <div class="translation-grid">
+        ${paragraphs.map((item, index) => `
+          <article class="translation-row">
+            <div class="translation-meta">P${escapeHtml(item.page)} · ${index + 1}</div>
+            <div class="translation-original">${escapeHtml(item.text)}</div>
+            <div class="translation-zh">${escapeHtml(item.text_zh || "暂无译文")}</div>
+          </article>
+        `).join("")}
+      </div>
+    </section>
+  `;
+  document.querySelector("#downloadFullTextBtn").addEventListener("click", () => {
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const stem = (result?.file_name || "fulltext").replace(/\.[^.]+$/, "");
+    link.href = url;
+    link.download = `${stem}_全文翻译对照.txt`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   });
 }
 
@@ -349,6 +404,56 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+async function loadHistory() {
+  try {
+    const response = await fetch("/api/history");
+    const payload = await response.json();
+    if (!response.ok || payload.error) throw new Error(payload.error || "加载历史失败");
+    historyItems = Array.isArray(payload.items) ? payload.items : [];
+    renderHistory();
+  } catch (error) {
+    historyList.innerHTML = `<p class="muted-line">历史加载失败：${escapeHtml(error.message)}</p>`;
+  }
+}
+
+function renderHistory() {
+  if (!historyList) return;
+  if (!historyItems.length) {
+    historyList.innerHTML = `<p class="muted-line">暂无历史结果</p>`;
+    return;
+  }
+  historyList.innerHTML = historyItems.map((item) => `
+    <button class="history-item ${item.job_id === result?.job_id ? "active" : ""}" type="button" data-job-id="${escapeHtml(item.job_id)}">
+      <span>${escapeHtml(item.file_name)}</span>
+      <small>${formatHistoryMeta(item)}</small>
+    </button>
+  `).join("");
+  historyList.querySelectorAll(".history-item").forEach((button) => {
+    button.addEventListener("click", () => loadResult(button.dataset.jobId));
+  });
+}
+
+function formatHistoryMeta(item) {
+  const updated = item.updated_at ? new Date(item.updated_at * 1000).toLocaleString("zh-CN", { hour12: false }) : "";
+  const para = item.paragraph_count ? ` · ${item.paragraph_count} 段` : "";
+  const rec = item.recommendation ? ` · ${item.recommendation}` : "";
+  return `${updated} · ${item.page_count || 0} 页 · ${item.figure_count || 0} 图${para}${rec}`;
+}
+
+async function loadResult(jobId) {
+  if (!jobId) return;
+  statusEl.textContent = "正在加载历史解析结果";
+  try {
+    const response = await fetch(`/api/result?job_id=${encodeURIComponent(jobId)}`);
+    const payload = await response.json();
+    if (!response.ok || payload.error) throw new Error(payload.error || "加载失败");
+    setResult(payload);
+    statusEl.textContent = "已加载历史解析结果";
+  } catch (error) {
+    statusEl.textContent = `加载失败：${error.message}`;
+  }
+}
+
 async function loadLatestIfRequested() {
   if (!new URLSearchParams(location.search).has("latest")) return;
   statusEl.textContent = "正在加载最近一次解析结果";
@@ -356,14 +461,12 @@ async function loadLatestIfRequested() {
     const response = await fetch("/api/latest");
     const payload = await response.json();
     if (!response.ok || payload.error) throw new Error(payload.error || "加载失败");
-    result = payload;
-    selectedId = result.figures[0]?.id || null;
+    setResult(payload);
     statusEl.textContent = "已加载最近一次解析结果";
-    renderMeta();
-    renderActiveTab();
   } catch (error) {
     statusEl.textContent = `加载失败：${error.message}`;
   }
 }
 
+loadHistory();
 loadLatestIfRequested();
