@@ -135,6 +135,61 @@ p {
   font-size: 14px;
 }
 
+.progress-panel {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  padding: 12px;
+}
+
+.progress-panel.error {
+  border-color: #d49a87;
+  background: #fff8f5;
+}
+
+.progress-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--accent-dark);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.progress-top strong {
+  flex: 0 0 auto;
+}
+
+.progress-bar {
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #e7ece9;
+  margin: 10px 0;
+}
+
+#progressFill {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+
+.progress-log {
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: #f7f5ef;
+  color: #37424a;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  white-space: pre-wrap;
+}
+
 .meta {
   margin-top: 18px;
   padding-top: 18px;

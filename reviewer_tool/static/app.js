@@ -2,6 +2,11 @@ const fileInput = document.querySelector("#fileInput");
 const analyzeBtn = document.querySelector("#analyzeBtn");
 const statusEl = document.querySelector("#status");
 const metaEl = document.querySelector("#meta");
+const progressPanel = document.querySelector("#progressPanel");
+const progressStage = document.querySelector("#progressStage");
+const progressPercent = document.querySelector("#progressPercent");
+const progressFill = document.querySelector("#progressFill");
+const progressLog = document.querySelector("#progressLog");
 const figureList = document.querySelector("#figureList");
 const detail = document.querySelector("#detail");
 const workspace = document.querySelector("#workspace");
@@ -15,6 +20,7 @@ let result = null;
 let selectedId = null;
 let activeTab = "figures";
 let historyItems = [];
+let progressTimer = null;
 
 tabs.forEach((tab) => {
   tab.addEventListener("click", () => {
@@ -33,9 +39,13 @@ analyzeBtn.addEventListener("click", async () => {
   const file = fileInput.files?.[0];
   if (!file) return;
   const data = new FormData();
+  const progressId = `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   data.append("file", file);
+  data.append("progress_id", progressId);
   analyzeBtn.disabled = true;
   statusEl.textContent = "正在解析论文、抽取附图、生成全文对照和审稿意见。这一步可能需要几分钟。";
+  resetProgress(progressId);
+  startProgressPolling(progressId);
   metaEl.textContent = "";
   figureList.innerHTML = `<div class="empty"><h2>解析中</h2><p>正在渲染页面并定位图注。</p></div>`;
   detail.innerHTML = `<div class="empty detail-empty"><h2>请稍候</h2><p>结果生成后会自动显示第一张图。</p></div>`;
@@ -51,9 +61,62 @@ analyzeBtn.addEventListener("click", async () => {
     statusEl.textContent = `解析失败：${error.message}`;
     figureList.innerHTML = `<div class="empty"><h2>解析失败</h2><p>${escapeHtml(error.message)}</p></div>`;
   } finally {
+    stopProgressPolling();
     analyzeBtn.disabled = false;
   }
 });
+
+function resetProgress(progressId) {
+  progressPanel.hidden = false;
+  progressPanel.dataset.progressId = progressId;
+  progressStage.textContent = "准备上传";
+  progressPercent.textContent = "0%";
+  progressFill.style.width = "0%";
+  progressLog.textContent = "[--:--:--] 准备上传文件";
+}
+
+function startProgressPolling(progressId) {
+  stopProgressPolling();
+  progressTimer = window.setInterval(() => pollProgress(progressId), 1000);
+  pollProgress(progressId);
+}
+
+function stopProgressPolling() {
+  if (progressTimer) {
+    window.clearInterval(progressTimer);
+    progressTimer = null;
+  }
+}
+
+async function pollProgress(progressId) {
+  try {
+    const response = await fetch(`/api/progress?id=${encodeURIComponent(progressId)}`);
+    const payload = await response.json();
+    if (!response.ok || payload.error) return;
+    renderProgress(payload);
+    if (payload.status === "done" || payload.status === "error") {
+      stopProgressPolling();
+    }
+  } catch {
+    // Keep polling; transient failures can happen while the server is busy starting the job.
+  }
+}
+
+function renderProgress(progress) {
+  const percent = Number.isFinite(progress.percent) ? progress.percent : 0;
+  progressPanel.hidden = false;
+  progressStage.textContent = progress.message ? `${progress.stage}：${progress.message}` : (progress.stage || "解析中");
+  progressPercent.textContent = `${percent}%`;
+  progressFill.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+  const logs = Array.isArray(progress.logs) ? progress.logs : [];
+  progressLog.textContent = logs.slice(-80).join("\n");
+  progressLog.scrollTop = progressLog.scrollHeight;
+  if (progress.status === "error") {
+    progressPanel.classList.add("error");
+  } else {
+    progressPanel.classList.remove("error");
+  }
+}
 
 function setResult(payload) {
   result = payload;

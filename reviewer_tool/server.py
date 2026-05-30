@@ -27,6 +27,7 @@ STATIC = ROOT / "static"
 WORK = ROOT / "work"
 UPLOADS = WORK / "uploads"
 JOBS = WORK / "jobs"
+PROGRESS = WORK / "progress"
 ZOTERO_STORAGE = Path(os.environ.get("ZOTERO_STORAGE", "/Users/junchai/Zotero/storage"))
 ZOTERO_INDEX = WORK / "zotero_index.json"
 PYTHON = sys.executable
@@ -50,8 +51,62 @@ def run(cmd, cwd=None, timeout=120):
 
 
 def ensure_dirs():
-    for path in (WORK, UPLOADS, JOBS):
+    for path in (WORK, UPLOADS, JOBS, PROGRESS):
         path.mkdir(parents=True, exist_ok=True)
+
+
+def safe_id(value):
+    value = str(value or "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", value):
+        return ""
+    return value
+
+
+def progress_path(progress_id):
+    progress_id = safe_id(progress_id)
+    if not progress_id:
+        return None
+    return PROGRESS / f"{progress_id}.json"
+
+
+def read_progress(progress_id):
+    path = progress_path(progress_id)
+    if path and path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {
+        "id": safe_id(progress_id),
+        "status": "pending",
+        "percent": 0,
+        "stage": "等待开始",
+        "message": "",
+        "logs": [],
+        "updated_at": time.time(),
+    }
+
+
+def update_progress(progress_id, percent, stage, message="", status="running"):
+    path = progress_path(progress_id)
+    if not path:
+        return
+    ensure_dirs()
+    data = read_progress(progress_id)
+    timestamp = time.strftime("%H:%M:%S")
+    line = f"[{timestamp}] {stage}" + (f"：{message}" if message else "")
+    logs = data.get("logs", [])
+    logs.append(line)
+    data.update({
+        "id": safe_id(progress_id),
+        "status": status,
+        "percent": max(0, min(100, int(percent))),
+        "stage": stage,
+        "message": message,
+        "logs": logs[-240:],
+        "updated_at": time.time(),
+    })
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def translate_zh(text):
@@ -190,7 +245,7 @@ def article_paragraphs(page_texts):
     return paragraphs
 
 
-def translate_article_paragraphs(page_texts):
+def translate_article_paragraphs(page_texts, progress_id=None):
     paragraphs = article_paragraphs(page_texts)
     if not paragraphs:
         return {"paragraphs": [], "source": "empty"}
@@ -205,6 +260,12 @@ def translate_article_paragraphs(page_texts):
     try:
         for start in range(0, len(paragraphs), 18):
             chunk = paragraphs[start:start + 18]
+            update_progress(
+                progress_id,
+                58 + int((start / max(1, len(paragraphs))) * 12),
+                "全文翻译",
+                f"正在翻译第 {start + 1}-{min(start + len(chunk), len(paragraphs))} 段，共 {len(paragraphs)} 段",
+            )
             data = parse_json_response(codex_text(prompt, json.dumps(chunk, ensure_ascii=False), timeout=480))
             if not isinstance(data, list):
                 raise ValueError("模型输出不是 JSON array")
@@ -936,17 +997,23 @@ def load_result(job_id):
     return result
 
 
-def analyze(src):
+def analyze(src, progress_id=None):
     ensure_dirs()
+    update_progress(progress_id, 2, "初始化", f"开始解析 {src.name}")
     job_id = f"{int(time.time())}-{file_hash(src)}"
     job_dir = JOBS / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
+    update_progress(progress_id, 6, "文档转换", "正在准备 PDF")
     pdf = convert_to_pdf(src, job_dir)
+    update_progress(progress_id, 10, "读取页数", "正在读取 PDF 元数据")
     pages = pdf_page_count(pdf)
+    update_progress(progress_id, 14, "抽取文本", f"正在抽取 {pages} 页正文")
     page_texts = extract_page_texts(pdf, job_dir)
 
+    update_progress(progress_id, 18, "附图识别", "正在定位图注并渲染页面")
     figures = []
     for idx in range(1, pages + 1):
+        update_progress(progress_id, 18 + int((idx / max(1, pages)) * 26), "附图识别", f"正在处理第 {idx}/{pages} 页")
         text = page_texts[idx - 1] if idx - 1 < len(page_texts) else ""
         for cap in parse_caption_from_page(text):
             fig_no = cap["figure_no"]
@@ -975,11 +1042,16 @@ def analyze(src):
                 "caption": caption,
                 "paragraph": para,
             })
+    update_progress(progress_id, 46, "附图翻译", f"识别到 {len(figures)} 张附图，正在翻译图注和相关段落")
     figures = translate_figure_texts(figures)
-    full_translation = translate_article_paragraphs(page_texts)
+    update_progress(progress_id, 56, "全文翻译", "正在生成全文原文-中文对照")
+    full_translation = translate_article_paragraphs(page_texts, progress_id)
+    update_progress(progress_id, 72, "摘要与创新点", "正在生成论文摘要和创新点")
     article_text = clean_article_text(page_texts)
     synthesis = build_summary_and_innovations(article_text)
+    update_progress(progress_id, 82, "文献核查", "正在检索 Zotero 本地库并判断创新性")
     literature = assess_literature_overlap(synthesis.get("innovations", []))
+    update_progress(progress_id, 92, "审稿意见", "正在生成中英文审稿意见")
     review = build_review_comments(article_text, synthesis, literature, figures)
 
     result = {
@@ -999,8 +1071,10 @@ def analyze(src):
         "model": CODEX_MODEL if USE_MODEL else "offline",
         "synthesis_source": synthesis.get("source", ""),
         "review_source": review.get("source", ""),
+        "debug_log": read_progress(progress_id).get("logs", []) if progress_id else [],
     }
     (job_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    update_progress(progress_id, 100, "完成", "解析完成", status="done")
     return result
 
 
@@ -1022,22 +1096,27 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self):
-        if self.path != "/api/analyze":
+        parsed = urlparse(self.path)
+        if parsed.path != "/api/analyze":
             self.send_json({"error": "Not found"}, 404)
             return
+        progress_id = ""
         try:
             form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={
                 "REQUEST_METHOD": "POST",
                 "CONTENT_TYPE": self.headers.get("Content-Type", ""),
             })
+            progress_id = safe_id(form.getfirst("progress_id", ""))
+            update_progress(progress_id, 1, "上传文件", "正在保存上传文件")
             item = form["file"]
             filename = Path(item.filename or "upload.pdf").name
             dest = UPLOADS / filename
             with open(dest, "wb") as f:
                 shutil.copyfileobj(item.file, f)
-            result = analyze(dest)
+            result = analyze(dest, progress_id=progress_id)
             self.send_json(result)
         except Exception as e:
+            update_progress(progress_id, 100, "解析失败", str(e), status="error")
             self.send_json({"error": str(e)}, 500)
 
     def do_GET(self):
@@ -1065,6 +1144,13 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 job_id = parse_qs(parsed.query).get("job_id", [""])[0]
                 self.send_json(load_result(job_id))
+            except Exception as e:
+                self.send_json({"error": str(e)}, 404)
+            return
+        if parsed.path == "/api/progress":
+            try:
+                progress_id = parse_qs(parsed.query).get("id", [""])[0]
+                self.send_json(read_progress(progress_id))
             except Exception as e:
                 self.send_json({"error": str(e)}, 404)
             return
